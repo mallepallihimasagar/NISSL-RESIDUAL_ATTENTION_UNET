@@ -87,4 +87,4 @@ class Nissl_Dataset(Dataset):
         input_image = input_image.numpy()
         onehot_mask = torch.nn.functional.one_hot(mask.to(torch.long))
         onehot_mask = onehot_mask.permute(2,0,1).numpy()
-        return input_image,np.expand_dims(onehot_mask[0],0)
+        return input_image,onehot_mask#np.expand_dims(onehot_mask[0],0)
