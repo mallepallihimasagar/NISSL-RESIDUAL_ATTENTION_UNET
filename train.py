@@ -1,4 +1,5 @@
 import time
+import argparse
 from collections import defaultdict
 import torch.nn.functional as F
 import torch
@@ -19,17 +20,33 @@ from network import ResAttU_Net
 torch.manual_seed(0)
 np.random.seed(0)
 
+#--------------------argparse arguemnts-----------------#
+parser = argparse.ArgumentParser()
+parser.add_argument('--model_name',type=str,default='res_att_unet')
+parser.add_argument('--trainset_path',type=str,default='Nissl_Dataset/train')
+parser.add_argument('--testset_path',type=str,default='Nissl_Dataset/test')
+parser.add_argument('--batch_size',type=int,default=4)
+parser.add_argument('--num_epochs',type=int,default=100)
+parser.add_argument('--input_channels',type=int,default=3)
+parser.add_argument('--output_channels',type=int,default=4)
+parser.add_argument('--model_save_path',type=str,default='res_att_unet.pt')
+parser.add_argument('--weights',type=str)
+
+args = parser.parse_args()
+
+
 # ------------------------parameters--------------------#
-batch_size = 4
-INPUT_CHANNELS = 3
-OUTPUT_CHANNELS = 4
-MODEL_NAME = 'res_att_unet'
-MODEL_SAVE_PATH = "res_att_unet.pt"
+batch_size = args.batch_size
+NUM_EPOCHS = args.num_epochs
+INPUT_CHANNELS = args.input_channels
+OUTPUT_CHANNELS = args.output_channels
+MODEL_NAME = args.model_name #'res_att_unet'
+MODEL_SAVE_PATH = args.model_save_path #"res_att_unet.pt"
 # ------------------------dataset-----------------------#
-train_dataset = Nissl_Dataset(root_dir='Nissl_Dataset/train')
+train_dataset = Nissl_Dataset(root_dir=args.trainset_path)
 train_dataset_len = train_dataset.__len__()
 
-test_dataset = Nissl_Dataset(root_dir='Nissl_Dataset/test')
+test_dataset = Nissl_Dataset(root_dir=args.testset_path)
 test_dataset_len = test_dataset.__len__()
 # ------------------------creating model file-----------------------#
 try:
@@ -93,7 +110,7 @@ def print_metrics(metrics, epoch_samples, phase):
     print("{}: {}".format(phase, ", ".join(outputs)))
 
 
-def train_model(model, optimizer, scheduler, num_epochs=20):
+def train_model(model, optimizer, scheduler, num_epochs=100):
     best_model_wts = copy.deepcopy(model.state_dict())
     best_loss = 1e10
     patience = 0
@@ -169,9 +186,9 @@ def train_model(model, optimizer, scheduler, num_epochs=20):
 
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(device)
+print(f'Training on {device}')
 
-# num_class = 6
+
 # -----------------------model--------------------------#
 def get_model(model_name=None):
     if model_name is None:
@@ -186,6 +203,10 @@ def get_model(model_name=None):
 
 model = get_model(MODEL_NAME).to(device)
 
+if args.weights:
+    print("Loading pre-trained weights from {args.weights}")
+    model.load_state_dict(torch.load(args.weights), strict=False)
+
 # freeze backbone layers
 # Comment out to finetune further
 # for l in model.base_layers:
@@ -196,7 +217,7 @@ optimizer_ft = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
 
 exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=50, gamma=0.1)
 
-model = train_model(model, optimizer_ft, exp_lr_scheduler, num_epochs=100)
+model = train_model(model, optimizer_ft, exp_lr_scheduler, num_epochs=NUM_EPOCHS)
 try:
     torch.save(model.state_dict(), MODEL_SAVE_PATH)
     print(f'Model saved succesfully at {MODEL_SAVE_PATH}')
