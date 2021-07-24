@@ -64,6 +64,7 @@ print(f'TESTING on {device}')
 
 #get model
 def get_model(model_name=None):
+    model = None
     if model_name is None:
         print('Undefined model - Model Name = None')
         return None
