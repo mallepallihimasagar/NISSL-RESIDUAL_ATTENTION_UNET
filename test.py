@@ -1,209 +1,177 @@
-import torch
-import matplotlib.pyplot as plt
 import numpy as np
-from nissl_dataset import Nissl_mask_dataset
-
-import time
-from collections import defaultdict
-import torch.nn.functional as F
 import torch
-from loss import dice_loss
-import torch.optim as optim
-from torch.optim import lr_scheduler
-import copy
-from torch.utils.data import DataLoader
+from torch.utils.data import dataset
+from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.dataset import random_split
-import torch.nn as nn
-from sklearn.metrics import f1_score
-import numpy as np
+from tqdm import tqdm
+import argparse
+import copy
+import os
 
+from nissl_dataset import Nissl_Dataset
+from network import U_Net,ResAttU_Net
+#from loss_functions import DiceLoss
+from metrics import dice_metric,pixel_accuracy,IoU,IoU_singlecell,calc_metrics
+from skimage import io
 
 torch.manual_seed(0)
 np.random.seed(0)
 
+#--------------------argparse arguemnts-----------------#
+parser = argparse.ArgumentParser()
+parser.add_argument('--model_name',type=str,default='res_att_unet')
+parser.add_argument('--trainset_path',type=str,default='Nissl_Dataset/train')
+parser.add_argument('--testset_path',type=str,default='Nissl_Dataset/test')
+parser.add_argument('--output',type=str,default='resattunet_output')
+parser.add_argument('--batch_size',type=int,default=1)
+parser.add_argument('--num_epochs',type=int,default=100)
+parser.add_argument('--input_channels',type=int,default=3)
+parser.add_argument('--output_channels',type=int,default=4)
+parser.add_argument('--model_save_path',type=str,default='res_att_unet.pt')
+parser.add_argument('--weights',type=str)
+
+args = parser.parse_args()
 # ------------------------parameters--------------------#
-batch_size = 4
-# ------------------------dataset-----------------------#
-dataset = Nissl_mask_dataset()
-dataset_len = dataset.__len__()
+BATCH_SIZE = args.batch_size
+LEARNING_RATE = 1e-4
+VALID_SPLIT = 0.1
+MODEL_NAME = args.model_name
 
-# train, val, test = random_split(dataset, [dataset_len-60, 30, 30])
-# noinspection PyArgumentList
-train, val, test = random_split(dataset, [228, 32, 66])
-train_loader = DataLoader(dataset=train, batch_size=batch_size, shuffle=True, num_workers=4)
-val_loader = DataLoader(dataset=val, batch_size=batch_size // 2, shuffle=True, num_workers=4)
-test_loader = DataLoader(dataset=test, batch_size=batch_size // 4, shuffle=True, num_workers=4)
+INPUT_CHANNELS=args.input_channels
+OUTPUT_CHANNELS= args.output_channels
+MODEL_PATH = args.weights #'/content/drive/MyDrive/final_models/trans_unet.pt'
 
 
-from nissl_dataset import Nissl_mask_dataset
-from network import U_Net
-from network import ResAttU_Net
+OUTPUT_FOLDER = args.output
 
+#dataset
+train = Nissl_Dataset(root_dir='Nissl_Dataset/train',Transforms=False)
+test = Nissl_Dataset(root_dir='Nissl_Dataset/test',Transforms=False)
 
+#Dataloaders
+
+val_size = int(train.__len__()*VALID_SPLIT)
+train_size = train.__len__()-val_size
+train_set,val_set = random_split(dataset=train,lengths=[train_size,val_size])
+
+train_loader = DataLoader(dataset=train_set,batch_size=BATCH_SIZE,pin_memory=True)
+val_loader = DataLoader(dataset=val_set,batch_size=BATCH_SIZE,pin_memory=True)
+test_loader = DataLoader(dataset=test,batch_size=BATCH_SIZE,pin_memory=True)
+
+#DEVICE
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(device)
+print(f'TESTING on {device}')
 
-modelunet = U_Net(UnetLayer=5, img_ch=3, output_ch=4).to(device)
-modelresunet = ResAttU_Net(UnetLayer=5,img_ch=3,output_ch=4).to(device)
-modelunet.load_state_dict(torch.load('/gdrive/MyDrive/models/unet'), strict=False)
-
-# output = modelunet(image.to(device))
-
-modelresunet.load_state_dict(torch.load('/gdrive/MyDrive/models/resunet'), strict=False)
-
-def gt_to_colorimg(masks):
+#get model
+def get_model(model_name=None):
     
-    
-    #colors = np.asarray([(201, 58, 64), (242, 207, 1), (0, 152, 75), (101, 172, 228)])#,(56, 34, 132), (160, 194, 56)])
+    if model_name is None:
+        print('Undefined model - Model Name = None')
+        model = None
+    elif model_name == 'unet':
+        model = U_Net(UnetLayer=5,img_ch=INPUT_CHANNELS,output_ch=OUTPUT_CHANNELS)
+    elif model_name == 'res_att_unet':
+        model = ResAttU_Net(UnetLayer=5,img_ch=INPUT_CHANNELS,output_ch=OUTPUT_CHANNELS)
 
-    colors = np.asarray([(0,0,0), (255,0,0), (0,255,0), (0,0,255)])
-    colorimg = np.ones((masks.shape[1], masks.shape[2], 3), dtype=np.float32) * 255
-    channels, height, width = masks.shape
-
-    for y in range(height):
-        for x in range(width):
-            selected_colors = colors[masks[:,y,x] > 0.5]
-            
-            if len(selected_colors) > 0:
-              if masks[:,y,x][3]:
-                colorimg[y,x,:]=colors[3]
-              elif masks[:,y,x][2]:
-                colorimg[y,x,:]=colors[2]
-              elif masks[:,y,x][1]:
-                colorimg[y,x,:]=colors[1]
-              else :
-                colorimg[y,x,:]=colors[0] 
-              # colorimg[y,x,:] = np.mean(selected_colors, axis=0)
+    return model
 
 
-    return colorimg.astype(np.uint8)
+model = get_model(model_name=MODEL_NAME).to(device)
+model.load_state_dict(torch.load(MODEL_PATH), strict=False)
+
+
+softmax = torch.nn.Softmax(dim=1)
+os.mkdir(f'{OUTPUT_FOLDER}')
+
+def rgb_output(image):
+    colors = {'red':(255,0,0),'green':(0,255,0),'blue':(0,0,255),'black':(0,0,0)}
+    out = np.zeros((512,512,3))
+
+    out[image==0,:]=colors['black']
+    out[image==1,:]=colors['red']
+    out[image==2,:]=colors['green']
+    out[image==3,:]=colors['blue']
+
+    return out
 
 def masks_to_colorimg(masks):
     
     
     #colors = np.asarray([(201, 58, 64), (242, 207, 1), (0, 152, 75), (101, 172, 228)])#,(56, 34, 132), (160, 194, 56)])
 
-    colors = np.asarray([(0,0,0), (255,0,0), (0,255,0), (0,0,255)])
+    colors = np.array([(0,0,0), (255,0,0), (0,255,0), (0,0,255)])
     colorimg = np.ones((masks.shape[1], masks.shape[2], 3), dtype=np.float32) * 255
+    
     channels, height, width = masks.shape
 
     for y in range(height):
         for x in range(width):
             #selected_colors = colors[masks[:,y,x] > 0.5]
-            index = np.argmax(masks[:,y,x])
-            
+            #index = np.argmax(masks[:,y,x])
+            index=0
+            if masks[1,y,x]==1:
+                index=1
+            elif masks[2,y,x]==1:
+                index=2
+            elif masks[3,y,x]==1:
+                index=3
             
             if index==2:
-              colorimg[y,x,:]=colors[2]
+                colorimg[y,x,:]=colors[2]
             elif index==1:
-              colorimg[y,x,:]=colors[1]
+                colorimg[y,x,:]=colors[1]
             elif index==3:
-              colorimg[y,x,:]=colors[3]
+                colorimg[y,x,:]=colors[3]
             else :
-              colorimg[y,x,:]=colors[0] 
-              # colorimg[y,x,:] = np.mean(selected_colors, axis=0)
+                colorimg[y,x,:]=colors[0] 
+                # colorimg[y,x,:] = np.mean(selected_colors, axis=0)
 
 
     return colorimg.astype(np.uint8)
+dice_coef=[]
+pixel_acc = []
+iou1 = []
+iou2=[]
+iou3=[]
 
-import matplotlib.pyplot as plt
-import os
-def make_binary(out,index):
+for idx,data in enumerate(test_loader):
+    image,mask = data
+    input = torch.true_divide(image,255).to(torch.float).to(device)
 
-  # plt.imshow(input.squeeze().cpu().permute(1,2,0))
-  out = out.squeeze()[index]
-  # out = torch.true_divide(out,255)
-  
-  out = out.cpu().numpy()
-  out[out>=0.5] = 1
-  out[out<0.5] = 0
-  return out
-
-unet_cell1_acc=[]
-unet_cell2_acc=[]
-unet_cell3_acc=[]
-
-resunet_cell1_acc=[]
-resunet_cell2_acc=[]
-resunet_cell3_acc=[]
-with torch.no_grad():
-  count = 1
-  try:
-    os.mkdir('output')
-  except:
-    print("output directory exists \n saving samples to /output/")
-  for input,target in test_loader:
-    print("saving sample_{} to output/".format(count))
-    input = torch.true_divide(input,255)
-    input = input.to(device)
-    os.mkdir('output/sample_{}'.format(count))
-    input= input.type(torch.float)
-    output = modelunet(input)
-    output2 = modelresunet(input)
-
-    plt.axis('off')
-    plt.imshow(input.squeeze().cpu().permute(1,2,0))
-    plt.savefig('output/sample_{}/input.png'.format(count), bbox_inches='tight', pad_inches=0)
-    plt.imshow(target.squeeze().cpu()[1],cmap='gray')
-    plt.savefig('output/sample_{}/gt_cell1.png'.format(count), bbox_inches='tight', pad_inches=0)
-    plt.imshow(target.squeeze().cpu()[2],cmap='gray')
-    plt.savefig('output/sample_{}/gt_cell2.png'.format(count), bbox_inches='tight', pad_inches=0)
-    plt.imshow(target.squeeze().cpu()[3],cmap='gray')
-    plt.savefig('output/sample_{}/gt_cell3.png'.format(count), bbox_inches='tight', pad_inches=0)
-
-    #unet output
-    plt.imshow(make_binary(output,1),cmap='gray')
-    plt.savefig('output/sample_{}/unet_cell1.png'.format(count), bbox_inches='tight', pad_inches=0)
-    plt.imshow(make_binary(output,2),cmap='gray')
-    plt.savefig('output/sample_{}/unet_cell2.png'.format(count), bbox_inches='tight', pad_inches=0)
-    plt.imshow(make_binary(output,3),cmap='gray')
-    plt.savefig('output/sample_{}/unet_cell3.png'.format(count), bbox_inches='tight', pad_inches=0)
-
-    target1 = target.squeeze().cpu()[1].numpy().reshape(512*512)
-    unet1 = make_binary(output,1).reshape(512*512)
-    unet_cell1_acc.append(sum(target1==unet1)/target1.shape[0])
-
-    target2 = target.squeeze().cpu()[2].numpy().reshape(512*512)
-    unet2 = make_binary(output,2).reshape(512*512)
-    unet_cell2_acc.append(sum(target2==unet2)/target2.shape[0])
-
-    target3 = target.squeeze().cpu()[3].numpy().reshape(512*512)
-    unet3 = make_binary(output,3).reshape(512*512)
-    unet_cell3_acc.append(sum(target3==unet3)/target3.shape[0])
-    #resunet output
-    plt.imshow(make_binary(output2,1),cmap='gray')
-    plt.savefig('output/sample_{}/resunet_cell1.png'.format(count), bbox_inches='tight', pad_inches=0)
-    plt.imshow(make_binary(output2,2),cmap='gray')
-    plt.savefig('output/sample_{}/resunet_cell2.png'.format(count), bbox_inches='tight', pad_inches=0)
-    plt.imshow(make_binary(output2,3),cmap='gray')
-    plt.savefig('output/sample_{}/resunet_cell3.png'.format(count), bbox_inches='tight', pad_inches=0)
-
-    #target1 = target.squeeze().cpu()[1].numpy().reshape(512*512)
-    resunet1 = make_binary(output2,1).reshape(512*512)
-    resunet_cell1_acc.append(sum(target1==resunet1)/target1.shape[0])
-
-    #target2 = target.squeeze().cpu()[2].numpy().reshape(512*512)
-    resunet2 = make_binary(output2,2).reshape(512*512)
-    resunet_cell2_acc.append(sum(target2==resunet2)/target2.shape[0])
-
-    #target3 = target.squeeze().cpu()[3].numpy().reshape(512*512)
-    resunet3 = make_binary(output2,3).reshape(512*512)
-    resunet_cell3_acc.append(sum(target3==resunet3)/target3.shape[0])
+    target = mask.to(torch.long).to(device)
 
 
-    target_rgb = gt_to_colorimg(target.squeeze().cpu().numpy())
-    plt.imshow(target_rgb)
-    plt.savefig('output/sample_{}/gt_rgb.png'.format(count), bbox_inches='tight', pad_inches=0)
+    output = model(input)
 
-    unet_pred_rgb = masks_to_colorimg(output.squeeze().cpu().numpy())
-    plt.imshow(unet_pred_rgb)
-    plt.savefig('output/sample_{}/unet_rgb.png'.format(count), bbox_inches='tight', pad_inches=0)
+    final_output = output
+    final_target = target
 
-    resunet_pred_rgb = masks_to_colorimg(output2.squeeze().cpu().numpy())
-    plt.imshow(resunet_pred_rgb)
-    plt.savefig('output/sample_{}/resunet_rgb.png'.format(count), bbox_inches='tight', pad_inches=0)
+    d,p,i1,i2,i3 = calc_metrics(final_output.detach().cpu(),final_target.detach().cpu())
 
-    count+=1
-    if count>=10:
-      break
+    dice_coef.append(d)
+    pixel_acc.append(p)
+    iou1.append(i1)
+    iou2.append(i2)
+    iou3.append(i3)
+
+    
+    output = torch.sigmoid(final_output).detach().cpu().squeeze(0).numpy()
+    output = (output>0.5).astype(np.uint8)
+    mask = final_target.detach().cpu()
+    rgb_out = masks_to_colorimg(output)
+
+    os.mkdir(f'{OUTPUT_FOLDER}/sample_{idx}')
+
+    io.imsave(f'{OUTPUT_FOLDER}/sample_{idx}/INPUT.png',image.squeeze(0).permute(1,2,0).numpy())
+    io.imsave(f'{OUTPUT_FOLDER}/sample_{idx}/GT.png',masks_to_colorimg(mask.squeeze(0).numpy()))
+    io.imsave(f'{OUTPUT_FOLDER}/sample_{idx}/pred.png',rgb_out)
+
+print('Results on test set')
+print(f'Dice coeff = {sum(dice_coef)/len(dice_coef)}')
+print(f'pixel acc  = {sum(pixel_acc)/len(pixel_acc)}')
+print(f'cell1 iou = {sum(iou1)/len(iou1)}')
+print(f'cell2 iou = {sum(iou2)/len(iou2)}')
+print(f'cell3 iou = {sum(iou3)/len(iou3)}')
+
+
 
