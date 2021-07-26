@@ -20,10 +20,10 @@ python train.py --model_name <model name> --num_epochs <no.of epochs> --model_sa
 ## Example
 python train.py --model_name 'res_att_unet' --num_epochs 100 --model_save_path resunet.pt
 ```
-- For using UNet Architecture replace <model name> with 'unet'.
-- <model name> 'res_att_unet' for Residual UNet with Attention Architecture.
+- For using UNet Architecture replace <model name> with **'unet'**.
+- <model name> **'res_att_unet'** for Residual UNet with Attention Architecture.
 
-If you want to use pre-trained weights and train the model use:
+If you want to use pre-trained weights and train the model use the following command:
 ```bash
 python train.py --model_name <model name> --num_epochs <no.of epochs> --model_save_path <filename.pt> --weights <path to pretraind weights (.pt file)>
 ```
