@@ -12,6 +12,7 @@ Clone the repo and execute to following commands for training and testing
 git clone https://github.com/mallepallihimasagar/NISSL-RESIDUAL_ATTENTION_UNET.git
 cd NISSL-RESIDUAL_ATTENTION_UNET
 ```
+Trained weights for [Residual UNet with Attention](https://drive.google.com/file/d/1-1iFeZkkYfNyGyCBgU5kydtwgoJS408I/view?usp=sharing) and [UNet](https://drive.google.com/file/d/1ov4Vzcgj8LvLDZyIanBv34hHYiwcDYei/view?usp=sharing) 
 ### Training the model
 ```bash
 python train.py --model_name <model name> --num_epochs <no.of epochs> --model_save_path <filename.pt>
